@@ -1,0 +1,1661 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>線上申請長照服務追蹤器</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+      background: linear-gradient(180deg, #0f172a 0%, #1e1b4b 100%);
+      min-height: 100vh;
+    }
+    input, button, select { font-family: inherit; }
+    input:focus, select:focus { outline: 2px solid #818cf8; }
+    select option { background: #1e293b; color: #e2e8f0; }
+    .btn { transition: all 0.15s; cursor: pointer; }
+    .btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+    }
+    .pulse-green { animation: pulse-green 2s infinite; }
+    @keyframes urgent-blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .urgent-blink { animation: urgent-blink 1s infinite; }
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; padding: 20px;
+    }
+    .modal-content {
+      background: linear-gradient(180deg, #1e293b 0%, #1e1b4b 100%);
+      border-radius: 16px; padding: 24px; max-width: 500px; width: 100%;
+      border: 1px solid rgba(255,255,255,0.1);
+      max-height: 80vh; overflow-y: auto;
+    }
+    .history-timeline {
+      position: relative;
+      padding-left: 20px;
+      margin: 12px 0;
+    }
+    .history-timeline::before {
+      content: '';
+      position: absolute;
+      left: 6px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: rgba(255,255,255,0.2);
+    }
+    .history-item {
+      position: relative;
+      padding: 8px 0 8px 16px;
+      font-size: 12px;
+    }
+    .history-item::before {
+      content: '';
+      position: absolute;
+      left: -14px;
+      top: 12px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #64748b;
+    }
+    .history-item.approved::before { background: #22c55e; }
+    .history-item.rejected::before { background: #ef4444; }
+    .history-item.tracking::before { background: #fbbf24; }
+    .history-item.stable::before { background: #3b82f6; }
+    .history-item.declined::before { background: #f97316; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    // ========== 工具家族標識 ==========
+    const TOOL_FAMILY = 'LTC_CARE_TOOLS';
+    const TOOL_VERSION = '8';
+    const TOOL_TYPE = 'ONLINE_APPLICATION_TRACKER';
+
+    // 台灣時區
+    const TW_TIMEZONE = 'Asia/Taipei';
+
+    // localStorage key
+    const STORAGE_KEY = 'onlineApplicationTracker_v2';
+    const OLD_STORAGE_KEYS = ['onlineApplicationTracker_v1', 'serviceApplicationTracker_v1'];
+
+    // 取得台灣現在時間
+    function getTaiwanNow() {
+      const now = new Date();
+      const twTime = new Date(now.toLocaleString('en-US', { timeZone: TW_TIMEZONE }));
+      return twTime;
+    }
+
+    // 取得台灣日期字串 (YYYY-MM-DD)
+    function getTaiwanDateString() {
+      const now = getTaiwanNow();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    // 格式化日期顯示
+    function formatDate(dateStr) {
+      if (!dateStr) return '-';
+      const d = new Date(dateStr + 'T00:00:00');
+      if (isNaN(d.getTime())) return '-';
+      return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+    }
+
+    // 計算經過天數（從日期到今天）
+    function calculateDaysPassed(dateStr) {
+      if (!dateStr) return null;
+      const start = new Date(dateStr + 'T00:00:00');
+      const today = new Date(getTaiwanDateString() + 'T00:00:00');
+      if (isNaN(start.getTime())) return null;
+      const diffTime = today - start;
+      const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+      return diffDays;
+    }
+
+    // 計算3個月後的日期
+    function addMonths(dateStr, months) {
+      const d = new Date(dateStr + 'T00:00:00');
+      d.setMonth(d.getMonth() + months);
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    // 檢查是否到達再追蹤日期
+    function checkFollowUpStatus(followUpDate) {
+      if (!followUpDate) return { needFollowUp: false, daysUntil: null };
+      const today = new Date(getTaiwanDateString() + 'T00:00:00');
+      const followUp = new Date(followUpDate + 'T00:00:00');
+      const diffTime = followUp - today;
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      return {
+        needFollowUp: diffDays <= 0,
+        daysUntil: diffDays,
+      };
+    }
+
+    // 遮蔽身分證字號（只顯示前3碼和後3碼）
+    function maskIdNumber(idNumber) {
+      if (!idNumber || idNumber.length < 6) return idNumber || '-';
+      return idNumber.substring(0, 3) + '****' + idNumber.substring(idNumber.length - 3);
+    }
+
+    // 計算總天數（從首次申請到現在或通過日）
+    function calculateTotalDays(app) {
+      if (!app.firstApplicationDate) return null;
+      const start = new Date(app.firstApplicationDate + 'T00:00:00');
+      const end = app.currentStatus === 'approved' && app.approvedDate
+        ? new Date(app.approvedDate + 'T00:00:00')
+        : new Date(getTaiwanDateString() + 'T00:00:00');
+      if (isNaN(start.getTime())) return null;
+      const diffTime = end - start;
+      return Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    }
+
+    // 計算總追蹤次數
+    function countTotalTrackings(history) {
+      return history.reduce((sum, round) => sum + (round.trackings?.length || 0), 0);
+    }
+
+    // 桃園區里別列表（官方82里，依五大次分區）
+    const TAOYUAN_VILLAGES = [
+      '文化里', '文明里', '武陵里', '民生里', '文昌里', '中和里', '中興里', '光興里',
+      '長美里', '民權里', '永興里', '東山里', '東門里', '東埔里', '長安里',
+      '中路里', '中正里', '中成里', '中山里', '中原里', '中泰里', '中聖里', '中德里',
+      '中信里', '文中里', '文德里', '龍岡里', '龍安里', '龍鳳里', '龍祥里', '龍壽里', '龍山里',
+      '埔子里', '中寧里', '自強里', '莊敬里', '長德里', '永安里', '同安里', '同德里',
+      '明德里', '寶慶里', '寶安里', '瑞慶里', '西門里', '西埔里', '南門里', '南華里',
+      '成功里', '信光里', '新埔里', '經國里', '慈文里', '中埔里',
+      '會稽里', '大業里', '大有里', '大興里', '大慶里', '大連里', '寶山里', '汴洲里',
+      '春日里', '福元里', '福安里', '忠義里', '三元里', '三民里', '青溪里', '朝陽里',
+      '雲林里', '萬壽里', '檜樂里',
+      '大林里', '大樹里', '大豐里', '大勇里', '建國里', '豐林里', '福林里', '大德里', '南埔里',
+      '其他',
+    ].sort((a, b) => a.localeCompare(b, 'zh-TW'));
+
+    // CMS等級
+    const CMS_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    // 空表單
+    const EMPTY_FORM = {
+      caseName: '',
+      idNumber: '',
+      applicationDate: getTaiwanDateString(),
+      region: '',
+      village: '',
+      caseSource: '',
+      approvedDate: '',  // 編輯已通過個案時使用
+    };
+
+    // 遷移舊資料到新格式
+    function migrateOldData(oldApp) {
+      const today = getTaiwanDateString();
+      
+      // 已經是新格式
+      if (oldApp.history && Array.isArray(oldApp.history)) {
+        return oldApp;
+      }
+
+      // 建立歷史紀錄
+      const history = [];
+      
+      if (oldApp.approvalStatus === 'approved') {
+        // 有通過的舊資料
+        history.push({
+          round: 1,
+          applicationDate: oldApp.applicationDate,
+          result: 'approved',
+          resultDate: oldApp.applicationDate, // 沒有確切日期，用申請日
+          cmsLevel: oldApp.cmsLevel,
+          trackings: [],
+        });
+      } else if (oldApp.approvalStatus === 'rejected') {
+        // 沒通過的舊資料
+        history.push({
+          round: 1,
+          applicationDate: oldApp.applicationDate,
+          result: 'rejected',
+          resultDate: oldApp.rejectedDate || oldApp.applicationDate,
+          trackings: [],
+        });
+      } else {
+        // 待追蹤的舊資料
+        history.push({
+          round: 1,
+          applicationDate: oldApp.applicationDate,
+          result: 'pending',
+          resultDate: null,
+          trackings: [],
+        });
+      }
+
+      return {
+        id: oldApp.id,
+        caseName: oldApp.caseName,
+        idNumber: oldApp.idNumber || '',
+        firstApplicationDate: oldApp.applicationDate,
+        region: oldApp.region,
+        village: oldApp.village || '',
+        caseSource: oldApp.caseSource,
+        currentStatus: oldApp.approvalStatus === 'approved' ? 'approved' 
+          : oldApp.approvalStatus === 'rejected' ? 'tracking' 
+          : 'pending',
+        cmsLevel: oldApp.cmsLevel || null,
+        approvedDate: oldApp.approvalStatus === 'approved' ? oldApp.applicationDate : null,
+        followUpDate: oldApp.followUpDate || null,
+        history: history,
+      };
+    }
+
+    function OnlineApplicationTracker() {
+      const [applications, setApplications] = useState([]);
+      const [form, setForm] = useState({ ...EMPTY_FORM });
+      const [editingId, setEditingId] = useState(null);
+      const [showExportMenu, setShowExportMenu] = useState(false);
+      const [, setTick] = useState(0);
+
+      // CMS等級選擇 Modal
+      const [showCmsModal, setShowCmsModal] = useState(false);
+      const [pendingApprovalId, setPendingApprovalId] = useState(null);
+
+      // 歷史紀錄 Modal
+      const [showHistoryModal, setShowHistoryModal] = useState(false);
+      const [historyViewApp, setHistoryViewApp] = useState(null);
+
+      // 篩選狀態
+      const [filterRegion, setFilterRegion] = useState('all');
+      const [filterSource, setFilterSource] = useState('all');
+      const [filterStatus, setFilterStatus] = useState('all');
+      const [sortBy, setSortBy] = useState('date');
+
+      // 每分鐘更新一次
+      useEffect(() => {
+        const interval = setInterval(() => setTick(t => t + 1), 60000);
+        return () => clearInterval(interval);
+      }, []);
+
+      // 載入資料
+      useEffect(() => {
+        let saved = localStorage.getItem(STORAGE_KEY);
+        
+        // 嘗試從舊版本載入
+        if (!saved) {
+          for (const oldKey of OLD_STORAGE_KEYS) {
+            saved = localStorage.getItem(oldKey);
+            if (saved) break;
+          }
+        }
+        
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            // 遷移所有舊資料
+            const migrated = parsed.map(migrateOldData);
+            setApplications(migrated);
+          } catch (e) {
+            console.error('載入資料失敗:', e);
+          }
+        }
+      }, []);
+
+      // 儲存資料
+      useEffect(() => {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(applications));
+      }, [applications]);
+
+      // 統計數據
+      const statistics = useMemo(() => {
+        const taoyuanCount = applications.filter(a => a.region === 'taoyuan').length;
+        const otherCount = applications.filter(a => a.region === 'other').length;
+        const selfCount = applications.filter(a => a.caseSource === 'self').length;
+        const externalCount = applications.filter(a => a.caseSource === 'external').length;
+        
+        const pendingCount = applications.filter(a => a.currentStatus === 'pending').length;
+        const trackingCount = applications.filter(a => a.currentStatus === 'tracking').length;
+        const approvedCount = applications.filter(a => a.currentStatus === 'approved').length;
+        
+        const followUpCount = applications.filter(a => {
+          if (a.currentStatus !== 'tracking' || !a.followUpDate) return false;
+          const { needFollowUp } = checkFollowUpStatus(a.followUpDate);
+          return needFollowUp;
+        }).length;
+
+        // 進階統計
+        const approvedApps = applications.filter(a => a.currentStatus === 'approved');
+        const totalRounds = approvedApps.reduce((sum, a) => sum + (a.history?.length || 1), 0);
+        const avgRounds = approvedApps.length > 0 ? (totalRounds / approvedApps.length).toFixed(1) : '-';
+        
+        // 計算平均開案天數（優先用 daysToApprove，沒有則用 calculateTotalDays）
+        const approvedDays = approvedApps.map(a => {
+          const lastRound = a.history?.[a.history.length - 1];
+          if (lastRound?.daysToApprove !== undefined) {
+            return lastRound.daysToApprove;
+          }
+          // fallback: 用 calculateTotalDays（舊資料兼容）
+          return calculateTotalDays(a);
+        }).filter(d => d !== null);
+        const avgDaysToApprove = approvedDays.length > 0 
+          ? (approvedDays.reduce((sum, d) => sum + d, 0) / approvedDays.length).toFixed(1)
+          : '-';
+
+        return {
+          total: applications.length,
+          taoyuan: taoyuanCount,
+          other: otherCount,
+          self: selfCount,
+          external: externalCount,
+          pending: pendingCount,
+          tracking: trackingCount,
+          approved: approvedCount,
+          followUp: followUpCount,
+          avgRounds: avgRounds,
+          avgDaysToApprove: avgDaysToApprove,
+        };
+      }, [applications]);
+
+      // 篩選排序後的列表
+      const filteredApplications = useMemo(() => {
+        let result = [...applications];
+
+        if (filterRegion !== 'all') {
+          result = result.filter(a => a.region === filterRegion);
+        }
+
+        if (filterSource !== 'all') {
+          result = result.filter(a => a.caseSource === filterSource);
+        }
+
+        if (filterStatus !== 'all') {
+          if (filterStatus === 'pending') {
+            result = result.filter(a => a.currentStatus === 'pending');
+          } else if (filterStatus === 'tracking') {
+            result = result.filter(a => a.currentStatus === 'tracking');
+          } else if (filterStatus === 'followup') {
+            result = result.filter(a => {
+              if (a.currentStatus !== 'tracking' || !a.followUpDate) return false;
+              const { needFollowUp } = checkFollowUpStatus(a.followUpDate);
+              return needFollowUp;
+            });
+          } else if (filterStatus === 'approved') {
+            result = result.filter(a => a.currentStatus === 'approved');
+          }
+        }
+
+        result.sort((a, b) => {
+          if (sortBy === 'date') {
+            return new Date(b.firstApplicationDate) - new Date(a.firstApplicationDate);
+          }
+          if (sortBy === 'name') {
+            return a.caseName.localeCompare(b.caseName, 'zh-TW');
+          }
+          if (sortBy === 'days') {
+            const daysA = calculateTotalDays(a) || 0;
+            const daysB = calculateTotalDays(b) || 0;
+            return daysB - daysA;
+          }
+          if (sortBy === 'rounds') {
+            return (b.history?.length || 1) - (a.history?.length || 1);
+          }
+          return 0;
+        });
+
+        return result;
+      }, [applications, filterRegion, filterSource, filterStatus, sortBy]);
+
+      // 備份
+      const handleBackup = () => {
+        const exportData = {
+          toolFamily: TOOL_FAMILY,
+          toolType: TOOL_TYPE,
+          toolVersion: TOOL_VERSION,
+          exportDate: getTaiwanDateString(),
+          data: applications,
+        };
+        const dataStr = JSON.stringify(exportData, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `線上申請追蹤備份_${getTaiwanDateString()}.json`;
+        link.click();
+      };
+
+      // 還原
+      const handleRestore = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const parsed = JSON.parse(event.target.result);
+
+            let data;
+            if (parsed.toolFamily === TOOL_FAMILY && parsed.data) {
+              if (parsed.toolType === TOOL_TYPE || parsed.toolType === 'SERVICE_APPLICATION_TRACKER') {
+                data = parsed.data;
+              } else {
+                alert('這不是線上申請長照服務追蹤器的備份檔');
+                return;
+              }
+            } else if (Array.isArray(parsed)) {
+              data = parsed;
+            } else {
+              alert('檔案格式錯誤');
+              return;
+            }
+
+            // 遷移所有資料
+            const validData = data.filter(item =>
+              item && typeof item === 'object' && item.id && item.caseName
+            ).map(item => migrateOldData(item));
+
+            if (validData.length === 0) {
+              alert('檔案中沒有有效的資料');
+              return;
+            }
+
+            if (confirm(`確定要還原 ${validData.length} 筆資料？\n（目前資料將被覆蓋）`)) {
+              setApplications(validData);
+              alert('還原成功！');
+            }
+          } catch (err) {
+            alert('檔案讀取失敗：' + err.message);
+          }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+      };
+
+      // 匯出 Excel
+      const exportToExcel = () => {
+        if (!applications.length) return alert('沒有資料可匯出');
+
+        const data = applications.map(a => {
+          const totalTrackings = countTotalTrackings(a.history || []);
+          
+          let statusText = '待追蹤';
+          if (a.currentStatus === 'approved') {
+            statusText = `已通過 (CMS ${a.cmsLevel}級)`;
+          } else if (a.currentStatus === 'tracking') {
+            const { needFollowUp } = checkFollowUpStatus(a.followUpDate);
+            statusText = needFollowUp ? '追蹤中 (需再追蹤)' : `追蹤中 (${formatDate(a.followUpDate)}再追蹤)`;
+          }
+
+          return {
+            '個案姓名': a.caseName,
+            '身分證字號': a.idNumber || '-',
+            '首次申請日期': a.firstApplicationDate,
+            '總天數': calculateTotalDays(a),
+            '地區': a.region === 'taoyuan' ? '桃園市' : '外縣市',
+            '里別': a.village || '-',
+            '案源': a.caseSource === 'self' ? '自開案' : '外開案',
+            '目前狀態': statusText,
+            '申請輪數': a.history?.length || 1,
+            '總追蹤次數': totalTrackings,
+            'CMS等級': a.cmsLevel || '-',
+            '通過日期': a.approvedDate || '-',
+          };
+        });
+
+        const ws = XLSX.utils.json_to_sheet(data);
+        ws['!cols'] = [
+          { wch: 10 }, { wch: 12 }, { wch: 14 }, { wch: 8 }, { wch: 8 }, 
+          { wch: 10 }, { wch: 8 }, { wch: 20 }, { wch: 10 }, { wch: 12 },
+          { wch: 10 }, { wch: 12 }
+        ];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, '線上申請');
+        XLSX.writeFile(wb, `線上申請清單_${getTaiwanDateString()}.xlsx`);
+        setShowExportMenu(false);
+      };
+
+      // 匯出 CSV
+      const exportToCSV = () => {
+        if (!applications.length) return alert('沒有資料可匯出');
+
+        const headers = ['個案姓名', '身分證字號', '首次申請日期', '總天數', '地區', '里別', '案源', '目前狀態', '申請輪數', '總追蹤次數', 'CMS等級', '通過日期'];
+        const rows = applications.map(a => {
+          const totalTrackings = countTotalTrackings(a.history || []);
+          
+          let statusText = '待追蹤';
+          if (a.currentStatus === 'approved') {
+            statusText = `已通過 (CMS ${a.cmsLevel}級)`;
+          } else if (a.currentStatus === 'tracking') {
+            const { needFollowUp } = checkFollowUpStatus(a.followUpDate);
+            statusText = needFollowUp ? '追蹤中 (需再追蹤)' : `追蹤中 (${formatDate(a.followUpDate)}再追蹤)`;
+          }
+
+          return [
+            a.caseName,
+            a.idNumber || '-',
+            a.firstApplicationDate,
+            calculateTotalDays(a),
+            a.region === 'taoyuan' ? '桃園市' : '外縣市',
+            a.village || '-',
+            a.caseSource === 'self' ? '自開案' : '外開案',
+            statusText,
+            a.history?.length || 1,
+            totalTrackings,
+            a.cmsLevel || '-',
+            a.approvedDate || '-',
+          ];
+        });
+
+        const csv = [headers.join(','), ...rows.map(r => r.map(v => {
+          const str = String(v);
+          if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+          }
+          return str;
+        }).join(','))].join('\n');
+
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `線上申請清單_${getTaiwanDateString()}.csv`;
+        link.click();
+        setShowExportMenu(false);
+      };
+
+      // 檢查重複
+      const isDuplicate = (idNumber, excludeId = null) => {
+        if (!idNumber) return false;
+        return applications.some(a => {
+          if (excludeId && a.id === excludeId) return false;
+          return a.idNumber && a.idNumber.toUpperCase() === idNumber.toUpperCase();
+        });
+      };
+
+      // 新增/編輯
+      const handleSubmit = () => {
+        if (!form.caseName) return alert('請輸入個案姓名');
+        if (!form.idNumber) return alert('請輸入身分證字號');
+        if (!form.applicationDate) return alert('請選擇申請日期');
+        if (!form.region) return alert('請選擇地區');
+        if (form.region === 'taoyuan' && !form.village) return alert('請選擇里別');
+        if (!form.caseSource) return alert('請選擇案源');
+
+        if (isDuplicate(form.idNumber, editingId)) {
+          return alert('此身分證字號已存在，請確認是否為重複個案');
+        }
+
+        if (editingId) {
+          // 編輯模式
+          setApplications(prev => prev.map(a => {
+            if (a.id !== editingId) return a;
+            
+            const updates = {
+              ...a,
+              caseName: form.caseName,
+              idNumber: form.idNumber.toUpperCase(),
+              region: form.region,
+              village: form.village,
+              caseSource: form.caseSource,
+            };
+
+            // 如果修改了首次申請日期
+            if (form.applicationDate && form.applicationDate !== a.firstApplicationDate) {
+              updates.firstApplicationDate = form.applicationDate;
+              
+              // 同步更新第一輪歷史的 applicationDate
+              const newHistory = [...(a.history || [])];
+              if (newHistory.length > 0) {
+                newHistory[0] = { ...newHistory[0], applicationDate: form.applicationDate };
+                // 如果第一輪已通過，重新計算 daysToApprove
+                if (newHistory[0].result === 'approved' && newHistory[0].resultDate) {
+                  const start = new Date(form.applicationDate + 'T00:00:00');
+                  const end = new Date(newHistory[0].resultDate + 'T00:00:00');
+                  newHistory[0].daysToApprove = Math.floor((end - start) / (1000 * 60 * 60 * 24));
+                }
+              }
+              updates.history = newHistory;
+            }
+            
+            // 如果是已通過個案且修改了通過日期
+            if (a.currentStatus === 'approved' && form.approvedDate) {
+              updates.approvedDate = form.approvedDate;
+              
+              // 更新 history 中最後一輪的 resultDate 和 daysToApprove
+              const newHistory = updates.history || [...(a.history || [])];
+              const lastRound = newHistory[newHistory.length - 1];
+              if (lastRound && lastRound.result === 'approved') {
+                lastRound.resultDate = form.approvedDate;
+                // 重新計算開案天數
+                const start = new Date(lastRound.applicationDate + 'T00:00:00');
+                const end = new Date(form.approvedDate + 'T00:00:00');
+                lastRound.daysToApprove = Math.floor((end - start) / (1000 * 60 * 60 * 24));
+              }
+              updates.history = newHistory;
+            }
+            
+            return updates;
+          }));
+          setEditingId(null);
+        } else {
+          // 新增模式
+          const newApp = {
+            id: Date.now(),
+            caseName: form.caseName,
+            idNumber: form.idNumber.toUpperCase(),
+            firstApplicationDate: form.applicationDate,
+            region: form.region,
+            village: form.village,
+            caseSource: form.caseSource,
+            currentStatus: 'pending',
+            cmsLevel: null,
+            approvedDate: null,
+            followUpDate: null,
+            history: [{
+              round: 1,
+              applicationDate: form.applicationDate,
+              result: 'pending',
+              resultDate: null,
+              trackings: [],
+            }],
+          };
+          setApplications(prev => [newApp, ...prev]);
+        }
+        setForm({ ...EMPTY_FORM });
+      };
+
+      // 點擊「有通過」
+      const handleApproveClick = (id) => {
+        setPendingApprovalId(id);
+        setShowCmsModal(true);
+      };
+
+      // 確認 CMS 等級（有通過）
+      const handleConfirmCms = (level) => {
+        if (!pendingApprovalId) return;
+        const today = getTaiwanDateString();
+        
+        setApplications(prev => prev.map(a => {
+          if (a.id !== pendingApprovalId) return a;
+          
+          const newHistory = [...(a.history || [])];
+          const lastRound = newHistory[newHistory.length - 1];
+          if (lastRound) {
+            lastRound.result = 'approved';
+            lastRound.resultDate = today;
+            lastRound.cmsLevel = level;
+            // 計算本輪從申請到通過的天數
+            const daysToApprove = calculateDaysPassed(lastRound.applicationDate);
+            lastRound.daysToApprove = daysToApprove;
+          }
+          
+          return {
+            ...a,
+            currentStatus: 'approved',
+            cmsLevel: level,
+            approvedDate: today,
+            followUpDate: null,
+            history: newHistory,
+          };
+        }));
+        
+        setShowCmsModal(false);
+        setPendingApprovalId(null);
+      };
+
+      // 沒通過
+      const handleReject = (id) => {
+        const today = getTaiwanDateString();
+        const followUpDate = addMonths(today, 3);
+        
+        setApplications(prev => prev.map(a => {
+          if (a.id !== id) return a;
+          
+          const newHistory = [...(a.history || [])];
+          const lastRound = newHistory[newHistory.length - 1];
+          if (lastRound) {
+            lastRound.result = 'rejected';
+            lastRound.resultDate = today;
+          }
+          
+          return {
+            ...a,
+            currentStatus: 'tracking',
+            followUpDate: followUpDate,
+            history: newHistory,
+          };
+        }));
+      };
+
+      // 體況如常（延後3個月）
+      const handleStable = (id) => {
+        const today = getTaiwanDateString();
+        const newFollowUpDate = addMonths(today, 3);
+        
+        setApplications(prev => prev.map(a => {
+          if (a.id !== id) return a;
+          
+          const newHistory = [...(a.history || [])];
+          const lastRound = newHistory[newHistory.length - 1];
+          if (lastRound) {
+            lastRound.trackings = lastRound.trackings || [];
+            lastRound.trackings.push({
+              dueDate: a.followUpDate,
+              actualDate: today,
+              outcome: 'stable',
+            });
+          }
+          
+          return {
+            ...a,
+            followUpDate: newFollowUpDate,
+            history: newHistory,
+          };
+        }));
+      };
+
+      // 體況變差（開啟新一輪申請）
+      const handleDeclined = (id) => {
+        const today = getTaiwanDateString();
+        
+        setApplications(prev => prev.map(a => {
+          if (a.id !== id) return a;
+          
+          const newHistory = [...(a.history || [])];
+          const lastRound = newHistory[newHistory.length - 1];
+          
+          // 記錄這次追蹤
+          if (lastRound) {
+            lastRound.trackings = lastRound.trackings || [];
+            lastRound.trackings.push({
+              dueDate: a.followUpDate,
+              actualDate: today,
+              outcome: 'declined',
+            });
+          }
+          
+          // 新增一輪申請
+          newHistory.push({
+            round: newHistory.length + 1,
+            applicationDate: today,
+            result: 'pending',
+            resultDate: null,
+            trackings: [],
+          });
+          
+          return {
+            ...a,
+            currentStatus: 'pending',
+            followUpDate: null,
+            history: newHistory,
+          };
+        }));
+      };
+
+      // 重設狀態（用於錯誤操作後修正）
+      const handleResetStatus = (id) => {
+        if (!confirm('確定要重設此個案的當前狀態？\n（將回到「待追蹤」狀態，但歷史紀錄會保留）')) return;
+        
+        setApplications(prev => prev.map(a => {
+          if (a.id !== id) return a;
+          
+          const newHistory = [...(a.history || [])];
+          const lastRound = newHistory[newHistory.length - 1];
+          if (lastRound) {
+            lastRound.result = 'pending';
+            lastRound.resultDate = null;
+          }
+          
+          return {
+            ...a,
+            currentStatus: 'pending',
+            cmsLevel: null,
+            approvedDate: null,
+            followUpDate: null,
+            history: newHistory,
+          };
+        }));
+      };
+
+      const handleEdit = (app) => {
+        setForm({ 
+          caseName: app.caseName,
+          idNumber: app.idNumber || '',
+          applicationDate: app.firstApplicationDate,
+          region: app.region,
+          village: app.village,
+          caseSource: app.caseSource,
+          approvedDate: app.approvedDate || '',
+        });
+        setEditingId(app.id);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+
+      const handleDelete = (id) => {
+        if (confirm('確定刪除此個案的所有記錄？\n（包含完整歷史軌跡）')) {
+          setApplications(prev => prev.filter(a => a.id !== id));
+          if (editingId === id) {
+            setEditingId(null);
+            setForm({ ...EMPTY_FORM });
+          }
+        }
+      };
+
+      const handleRegionChange = (newRegion) => {
+        setForm(prev => ({
+          ...prev,
+          region: newRegion,
+          village: newRegion === 'taoyuan' ? prev.village : '',
+        }));
+      };
+
+      const openHistoryModal = (app) => {
+        setHistoryViewApp(app);
+        setShowHistoryModal(true);
+      };
+
+      const inputStyle = {
+        padding: '8px 10px',
+        borderRadius: '6px',
+        border: '1px solid rgba(255,255,255,0.15)',
+        background: 'rgba(255,255,255,0.08)',
+        color: 'white',
+        fontSize: '14px',
+      };
+
+      // 渲染歷史軌跡
+      const renderHistoryTimeline = (history, compact = false) => {
+        if (!history || history.length === 0) return null;
+        
+        return (
+          <div className="history-timeline">
+            {history.map((round, roundIdx) => (
+              <React.Fragment key={roundIdx}>
+                {/* 申請事件 */}
+                <div className={`history-item ${round.result}`}>
+                  <div style={{ color: '#e2e8f0', fontWeight: '500' }}>
+                    第 {round.round} 輪申請
+                    <span style={{ color: '#64748b', fontWeight: '400', marginLeft: '8px' }}>
+                      {formatDate(round.applicationDate)}
+                    </span>
+                  </div>
+                  {round.result === 'approved' && (
+                    <div style={{ color: '#22c55e', marginTop: '2px' }}>
+                      ✓ 通過 CMS {round.cmsLevel}級 ({formatDate(round.resultDate)})
+                      {round.daysToApprove !== undefined && (
+                        <span style={{ color: '#94a3b8', marginLeft: '6px' }}>
+                          · 本輪 {round.daysToApprove} 天
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {round.result === 'rejected' && (
+                    <div style={{ color: '#ef4444', marginTop: '2px' }}>
+                      ✗ 沒通過 ({formatDate(round.resultDate)})
+                    </div>
+                  )}
+                  {round.result === 'pending' && (
+                    <div style={{ color: '#fbbf24', marginTop: '2px' }}>
+                      ⏳ 待追蹤
+                    </div>
+                  )}
+                </div>
+                
+                {/* 追蹤事件 */}
+                {round.trackings && round.trackings.map((tracking, trackIdx) => (
+                  <div key={trackIdx} className={`history-item ${tracking.outcome}`}>
+                    <div style={{ color: '#94a3b8' }}>
+                      追蹤 #{trackIdx + 1}
+                      <span style={{ marginLeft: '8px' }}>
+                        {formatDate(tracking.actualDate)}
+                      </span>
+                    </div>
+                    <div style={{ 
+                      color: tracking.outcome === 'stable' ? '#3b82f6' : '#f97316',
+                      marginTop: '2px',
+                    }}>
+                      {tracking.outcome === 'stable' ? '→ 體況如常，再延3個月' : '→ 體況變差，重新申請'}
+                    </div>
+                  </div>
+                ))}
+              </React.Fragment>
+            ))}
+          </div>
+        );
+      };
+
+      return (
+        <div style={{
+          minHeight: '100vh',
+          background: 'linear-gradient(180deg, #0f172a 0%, #1e1b4b 100%)',
+          padding: '16px',
+          color: '#e2e8f0',
+        }}>
+          <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+            {/* Header */}
+            <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+              <h1 style={{
+                fontSize: '20px', fontWeight: '700', margin: 0,
+                background: 'linear-gradient(135deg, #818cf8 0%, #c084fc 100%)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+              }}>
+                線上申請長照服務追蹤器
+              </h1>
+              <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px', marginBottom: '12px' }}>
+                長照管理工具組 · 最前端作業
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                <button onClick={handleBackup} className="btn" style={{
+                  padding: '8px 12px', borderRadius: '8px',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  background: 'rgba(255,255,255,0.05)',
+                  color: '#94a3b8', fontSize: '12px',
+                }}>備份</button>
+                <label className="btn" style={{
+                  padding: '8px 12px', borderRadius: '8px',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  background: 'rgba(255,255,255,0.05)',
+                  color: '#94a3b8', fontSize: '12px', cursor: 'pointer',
+                }}>
+                  還原
+                  <input type="file" accept=".json" onChange={handleRestore} style={{ display: 'none' }} />
+                </label>
+
+                {applications.length > 0 && (
+                  <div style={{ position: 'relative' }}>
+                    <button onClick={() => setShowExportMenu(!showExportMenu)} className="btn" style={{
+                      padding: '8px 12px', borderRadius: '8px',
+                      border: '1px solid rgba(255,255,255,0.2)',
+                      background: 'rgba(255,255,255,0.05)',
+                      color: '#94a3b8', fontSize: '12px',
+                    }}>
+                      匯出 ▾
+                    </button>
+                    {showExportMenu && (
+                      <React.Fragment>
+                        <div style={{ position: 'fixed', inset: 0, zIndex: 50 }} onClick={() => setShowExportMenu(false)} />
+                        <div style={{
+                          position: 'absolute', top: '100%', right: 0, marginTop: '4px',
+                          background: '#1e293b', border: '1px solid rgba(255,255,255,0.15)',
+                          borderRadius: '8px', padding: '4px', minWidth: '120px', zIndex: 100,
+                        }}>
+                          <button onClick={exportToExcel} style={{ display: 'block', width: '100%', padding: '10px 12px', textAlign: 'left', background: 'transparent', border: 'none', color: '#e2e8f0', fontSize: '13px', cursor: 'pointer', borderRadius: '6px' }}>Excel</button>
+                          <button onClick={exportToCSV} style={{ display: 'block', width: '100%', padding: '10px 12px', textAlign: 'left', background: 'transparent', border: 'none', color: '#e2e8f0', fontSize: '13px', cursor: 'pointer', borderRadius: '6px' }}>CSV</button>
+                        </div>
+                      </React.Fragment>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 再追蹤提醒 */}
+            {statistics.followUp > 0 && (
+              <div style={{
+                background: 'rgba(251,191,36,0.15)',
+                border: '1px solid rgba(251,191,36,0.4)',
+                borderRadius: '8px',
+                padding: '12px 16px',
+                marginBottom: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '10px',
+              }}>
+                <span className="urgent-blink" style={{ fontSize: '20px' }}>⏰</span>
+                <div>
+                  <div style={{ fontSize: '14px', fontWeight: '500', color: '#fbbf24' }}>
+                    有 {statistics.followUp} 筆個案需要再追蹤
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#94a3b8' }}>
+                    這些個案追蹤期已到，請電訪確認體況
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 輸入表單 */}
+            <div style={{
+              background: 'rgba(255,255,255,0.04)', borderRadius: '12px', padding: '16px', marginBottom: '20px',
+              border: editingId ? '2px solid #818cf8' : '1px solid rgba(255,255,255,0.1)',
+            }}>
+              {editingId && (
+                <div style={{ background: 'rgba(129,140,248,0.15)', padding: '8px 12px', borderRadius: '6px', marginBottom: '12px', fontSize: '13px', color: '#a5b4fc' }}>
+                  編輯中：{form.caseName}
+                  {form.approvedDate && <span style={{ color: '#22c55e' }}>（已通過個案，可調整通過日期）</span>}
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: editingId ? '#64748b' : '#94a3b8' }}>
+                    個案姓名 *{editingId ? '（鎖定）' : ''}
+                  </label>
+                  <input
+                    type="text"
+                    value={form.caseName}
+                    onChange={(e) => setForm(prev => ({ ...prev, caseName: e.target.value }))}
+                    placeholder="輸入姓名"
+                    disabled={!!editingId}
+                    style={{ ...inputStyle, width: '100%', opacity: editingId ? 0.5 : 1 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: editingId ? '#64748b' : '#94a3b8' }}>
+                    身分證字號 *{editingId ? '（鎖定）' : ''}
+                  </label>
+                  <input
+                    type="text"
+                    value={form.idNumber}
+                    onChange={(e) => setForm(prev => ({ ...prev, idNumber: e.target.value.toUpperCase() }))}
+                    placeholder="輸入身分證字號"
+                    maxLength={10}
+                    disabled={!!editingId}
+                    style={{ ...inputStyle, width: '100%', textTransform: 'uppercase', opacity: editingId ? 0.5 : 1 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: editingId ? '#f59e0b' : '#94a3b8' }}>
+                    {editingId ? '首次申請日期（可修正）' : '申請日期 *'}
+                  </label>
+                  <input
+                    type="date"
+                    value={form.applicationDate}
+                    onChange={(e) => setForm(prev => ({ ...prev, applicationDate: e.target.value }))}
+                    style={{ ...inputStyle, width: '100%' }}
+                  />
+                  {editingId && (
+                    <div style={{ fontSize: '11px', color: '#f59e0b', marginTop: '4px' }}>
+                      ⚠ 修改後將同步更新總天數計算
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#94a3b8' }}>地區 *</label>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      type="button"
+                      onClick={() => handleRegionChange('taoyuan')}
+                      style={{
+                        flex: 1, padding: '10px', borderRadius: '6px', border: 'none',
+                        background: form.region === 'taoyuan' ? 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)' : 'rgba(255,255,255,0.1)',
+                        color: form.region === 'taoyuan' ? 'white' : '#94a3b8',
+                        fontSize: '13px', fontWeight: '500', cursor: 'pointer',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      桃園市
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRegionChange('other')}
+                      style={{
+                        flex: 1, padding: '10px', borderRadius: '6px', border: 'none',
+                        background: form.region === 'other' ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)' : 'rgba(255,255,255,0.1)',
+                        color: form.region === 'other' ? 'white' : '#94a3b8',
+                        fontSize: '13px', fontWeight: '500', cursor: 'pointer',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      外縣市
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#94a3b8' }}>
+                    里別 {form.region === 'taoyuan' ? '*' : ''}
+                  </label>
+                  {form.region === 'taoyuan' ? (
+                    <select
+                      value={form.village}
+                      onChange={(e) => setForm(prev => ({ ...prev, village: e.target.value }))}
+                      style={{ ...inputStyle, width: '100%' }}
+                    >
+                      <option value="">請選擇里別</option>
+                      {TAOYUAN_VILLAGES.map(v => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div style={{
+                      ...inputStyle,
+                      width: '100%',
+                      color: '#64748b',
+                      display: 'flex',
+                      alignItems: 'center',
+                    }}>
+                      —
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#94a3b8' }}>案源 *</label>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setForm(prev => ({ ...prev, caseSource: 'self' }))}
+                    style={{
+                      flex: 1, padding: '10px', borderRadius: '6px', border: 'none',
+                      background: form.caseSource === 'self' ? 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' : 'rgba(255,255,255,0.1)',
+                      color: form.caseSource === 'self' ? 'white' : '#94a3b8',
+                      fontSize: '13px', fontWeight: '500', cursor: 'pointer',
+                      transition: 'all 0.15s',
+                    }}
+                  >
+                    自開案
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm(prev => ({ ...prev, caseSource: 'external' }))}
+                    style={{
+                      flex: 1, padding: '10px', borderRadius: '6px', border: 'none',
+                      background: form.caseSource === 'external' ? 'linear-gradient(135deg, #a855f7 0%, #9333ea 100%)' : 'rgba(255,255,255,0.1)',
+                      color: form.caseSource === 'external' ? 'white' : '#94a3b8',
+                      fontSize: '13px', fontWeight: '500', cursor: 'pointer',
+                      transition: 'all 0.15s',
+                    }}
+                  >
+                    外開案
+                  </button>
+                </div>
+              </div>
+
+              {/* 通過日期（僅編輯已通過個案時顯示） */}
+              {editingId && form.approvedDate && (
+                <div style={{ marginBottom: '16px' }}>
+                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#22c55e' }}>
+                    通過日期（可調整）
+                  </label>
+                  <input
+                    type="date"
+                    value={form.approvedDate}
+                    onChange={(e) => setForm(prev => ({ ...prev, approvedDate: e.target.value }))}
+                    style={{ ...inputStyle, width: '100%', maxWidth: '200px' }}
+                  />
+                  <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+                    調整後將重新計算開案天數
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                {editingId && (
+                  <button onClick={() => { setEditingId(null); setForm({ ...EMPTY_FORM }); }} className="btn" style={{
+                    padding: '10px 20px', borderRadius: '8px',
+                    border: '1px solid rgba(255,255,255,0.2)', background: 'transparent', color: '#94a3b8', fontSize: '14px',
+                  }}>取消</button>
+                )}
+                <button onClick={handleSubmit} className="btn" style={{
+                  padding: '10px 24px', borderRadius: '8px', border: 'none',
+                  background: editingId ? 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)' : 'linear-gradient(135deg, #818cf8 0%, #6366f1 100%)',
+                  color: 'white', fontSize: '14px', fontWeight: '500',
+                }}>
+                  {editingId ? '儲存' : '新增'}
+                </button>
+              </div>
+            </div>
+
+            {/* 統計區塊 */}
+            {applications.length > 0 && (
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '8px', marginBottom: '8px' }}>
+                  <div style={{ background: 'rgba(129,140,248,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(129,140,248,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#818cf8' }}>{statistics.total}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>總計</div>
+                  </div>
+                  <div style={{ background: 'rgba(34,197,94,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(34,197,94,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#22c55e' }}>{statistics.taoyuan}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>桃園市</div>
+                  </div>
+                  <div style={{ background: 'rgba(249,115,22,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(249,115,22,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#f97316' }}>{statistics.other}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>外縣市</div>
+                  </div>
+                  <div style={{ background: 'rgba(59,130,246,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(59,130,246,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#3b82f6' }}>{statistics.self}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>自開案</div>
+                  </div>
+                  <div style={{ background: 'rgba(168,85,247,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(168,85,247,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#a855f7' }}>{statistics.external}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>外開案</div>
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '8px' }}>
+                  <div style={{ background: 'rgba(251,191,36,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(251,191,36,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#fbbf24' }}>{statistics.pending}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>待追蹤</div>
+                  </div>
+                  <div style={{ background: 'rgba(14,165,233,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(14,165,233,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#0ea5e9' }}>{statistics.tracking}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>追蹤中</div>
+                  </div>
+                  <div style={{ background: 'rgba(34,197,94,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(34,197,94,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#22c55e' }}>{statistics.approved}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>已通過</div>
+                  </div>
+                  <div style={{ background: statistics.followUp > 0 ? 'rgba(251,191,36,0.2)' : 'rgba(100,116,139,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: statistics.followUp > 0 ? '1px solid rgba(251,191,36,0.5)' : '1px solid rgba(100,116,139,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: statistics.followUp > 0 ? '#fbbf24' : '#64748b' }}>{statistics.followUp}</div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>需再追蹤</div>
+                  </div>
+                  <div style={{ background: 'rgba(100,116,139,0.15)', borderRadius: '8px', padding: '10px', textAlign: 'center', border: '1px solid rgba(100,116,139,0.33)' }}>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: '#94a3b8' }}>{statistics.avgDaysToApprove}<span style={{ fontSize: '12px', fontWeight: '400' }}>天</span></div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>平均開案</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 篩選排序 */}
+            {applications.length > 0 && (
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
+                <select value={filterRegion} onChange={(e) => setFilterRegion(e.target.value)} style={{ ...inputStyle, width: '100px' }}>
+                  <option value="all">全部地區</option>
+                  <option value="taoyuan">桃園市</option>
+                  <option value="other">外縣市</option>
+                </select>
+                <select value={filterSource} onChange={(e) => setFilterSource(e.target.value)} style={{ ...inputStyle, width: '100px' }}>
+                  <option value="all">全部案源</option>
+                  <option value="self">自開案</option>
+                  <option value="external">外開案</option>
+                </select>
+                <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ ...inputStyle, width: '110px' }}>
+                  <option value="all">全部狀態</option>
+                  <option value="pending">待追蹤</option>
+                  <option value="tracking">追蹤中</option>
+                  <option value="followup">需再追蹤</option>
+                  <option value="approved">已通過</option>
+                </select>
+                <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ ...inputStyle, width: '110px' }}>
+                  <option value="date">日期排序</option>
+                  <option value="days">天數排序</option>
+                  <option value="name">姓名排序</option>
+                  <option value="rounds">輪數排序</option>
+                </select>
+                <span style={{ fontSize: '12px', color: '#64748b' }}>
+                  顯示 {filteredApplications.length} / {applications.length} 筆
+                </span>
+              </div>
+            )}
+
+            {/* 列表標題 */}
+            {filteredApplications.length > 0 && (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '70px 90px 90px 55px 55px 55px 55px 60px 1fr 90px',
+                gap: '6px',
+                padding: '8px 12px',
+                fontSize: '11px',
+                color: '#64748b',
+                borderBottom: '1px solid rgba(255,255,255,0.1)',
+                marginBottom: '8px',
+                textAlign: 'center',
+              }}>
+                <span>姓名</span>
+                <span>身分證字號</span>
+                <span>首次申請</span>
+                <span>總天數</span>
+                <span>輪數</span>
+                <span>地區</span>
+                <span>里別</span>
+                <span>案源</span>
+                <span>狀態/操作</span>
+                <span>管理</span>
+              </div>
+            )}
+
+            {/* 列表 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              {applications.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px 20px', color: '#64748b' }}>
+                  <div style={{ fontSize: '40px', marginBottom: '12px' }}>📋</div>
+                  <p>尚無資料，請新增線上申請</p>
+                </div>
+              ) : filteredApplications.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '30px 20px', color: '#64748b' }}>
+                  <p>沒有符合條件的資料</p>
+                </div>
+              ) : filteredApplications.map(app => {
+                const totalDays = calculateTotalDays(app);
+                const roundCount = app.history?.length || 1;
+                const isPending = app.currentStatus === 'pending';
+                const isTracking = app.currentStatus === 'tracking';
+                const isApproved = app.currentStatus === 'approved';
+                const followUpStatus = isTracking ? checkFollowUpStatus(app.followUpDate) : null;
+                const needFollowUp = followUpStatus?.needFollowUp;
+                
+                return (
+                  <div key={app.id} style={{
+                    background: needFollowUp ? 'rgba(251,191,36,0.1)' 
+                      : isPending ? 'rgba(251,191,36,0.05)' 
+                      : isApproved ? 'rgba(34,197,94,0.05)' 
+                      : 'rgba(14,165,233,0.05)',
+                    borderRadius: '8px',
+                    border: needFollowUp ? '1px solid rgba(251,191,36,0.4)' 
+                      : isPending ? '1px solid rgba(251,191,36,0.2)' 
+                      : isApproved ? '1px solid rgba(34,197,94,0.2)' 
+                      : '1px solid rgba(14,165,233,0.2)',
+                    overflow: 'hidden',
+                  }}>
+                    {/* 主列 */}
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: '70px 90px 90px 55px 55px 55px 55px 60px 1fr 90px',
+                      gap: '6px',
+                      padding: '12px',
+                      alignItems: 'center',
+                      textAlign: 'center',
+                    }}>
+                      <div style={{ fontWeight: '500', fontSize: '13px' }}>{app.caseName}</div>
+                      <div style={{ fontSize: '11px', color: '#94a3b8' }}>{maskIdNumber(app.idNumber)}</div>
+                      <div style={{ fontSize: '12px', color: '#94a3b8' }}>{formatDate(app.firstApplicationDate)}</div>
+                      <div>
+                        <span style={{
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontWeight: '600',
+                          background: totalDays >= 180 ? 'rgba(239,68,68,0.2)' : totalDays >= 90 ? 'rgba(251,191,36,0.2)' : 'rgba(34,197,94,0.2)',
+                          color: totalDays >= 180 ? '#ef4444' : totalDays >= 90 ? '#fbbf24' : '#22c55e',
+                        }}>
+                          {totalDays}天
+                        </span>
+                      </div>
+                      <div>
+                        <span style={{
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontWeight: '500',
+                          background: roundCount > 1 ? 'rgba(168,85,247,0.2)' : 'rgba(100,116,139,0.2)',
+                          color: roundCount > 1 ? '#a855f7' : '#94a3b8',
+                        }}>
+                          第{roundCount}輪
+                        </span>
+                      </div>
+                      <div>
+                        <span style={{
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          fontSize: '10px',
+                          fontWeight: '500',
+                          background: app.region === 'taoyuan' ? 'rgba(34,197,94,0.2)' : 'rgba(249,115,22,0.2)',
+                          color: app.region === 'taoyuan' ? '#22c55e' : '#f97316',
+                        }}>
+                          {app.region === 'taoyuan' ? '桃園' : '外縣市'}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#94a3b8' }}>{app.village || '—'}</div>
+                      <div>
+                        <span style={{
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          fontSize: '10px',
+                          fontWeight: '500',
+                          background: app.caseSource === 'self' ? 'rgba(59,130,246,0.2)' : 'rgba(168,85,247,0.2)',
+                          color: app.caseSource === 'self' ? '#3b82f6' : '#a855f7',
+                        }}>
+                          {app.caseSource === 'self' ? '自開案' : '外開案'}
+                        </span>
+                      </div>
+                      
+                      {/* 狀態/操作 */}
+                      <div style={{ display: 'flex', gap: '4px', justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap' }}>
+                        {isPending ? (
+                          <>
+                            <button onClick={() => handleApproveClick(app.id)} className="btn pulse-green" style={{
+                              padding: '4px 8px', borderRadius: '4px', border: 'none',
+                              background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                              color: 'white', fontSize: '10px', fontWeight: '500',
+                            }}>有通過</button>
+                            <button onClick={() => handleReject(app.id)} className="btn" style={{
+                              padding: '4px 8px', borderRadius: '4px', border: 'none',
+                              background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                              color: 'white', fontSize: '10px', fontWeight: '500',
+                            }}>沒通過</button>
+                          </>
+                        ) : isApproved ? (
+                          <span onClick={() => handleResetStatus(app.id)} style={{
+                            padding: '4px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: '500',
+                            background: 'rgba(34,197,94,0.3)', color: '#22c55e', cursor: 'pointer',
+                          }} title="點擊可重設">
+                            ✓ CMS {app.cmsLevel}級
+                          </span>
+                        ) : needFollowUp ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                            <span className="urgent-blink" style={{
+                              padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '600',
+                              background: 'rgba(251,191,36,0.3)', color: '#fbbf24',
+                            }}>
+                              ⏰ 追蹤到期！
+                            </span>
+                            <div style={{ display: 'flex', gap: '4px' }}>
+                              <button onClick={() => handleStable(app.id)} className="btn" style={{
+                                padding: '3px 6px', borderRadius: '4px', border: 'none',
+                                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                                color: 'white', fontSize: '9px', fontWeight: '500',
+                              }}>體況如常</button>
+                              <button onClick={() => handleDeclined(app.id)} className="btn" style={{
+                                padding: '3px 6px', borderRadius: '4px', border: 'none',
+                                background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)',
+                                color: 'white', fontSize: '9px', fontWeight: '500',
+                              }}>體況變差</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+                            <span onClick={() => handleResetStatus(app.id)} style={{
+                              padding: '4px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: '500',
+                              background: 'rgba(14,165,233,0.3)', color: '#0ea5e9', cursor: 'pointer',
+                            }} title="點擊可重設">
+                              追蹤中
+                            </span>
+                            <span style={{ fontSize: '9px', color: '#64748b' }}>
+                              {formatDate(app.followUpDate)} 到期
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* 管理按鈕 */}
+                      <div style={{ display: 'flex', gap: '4px', justifyContent: 'center' }}>
+                        <button onClick={() => openHistoryModal(app)} className="btn" style={{
+                          padding: '4px 6px', borderRadius: '4px',
+                          border: '1px solid rgba(168,85,247,0.3)',
+                          background: 'transparent', color: '#a855f7', fontSize: '10px',
+                        }}>歷史</button>
+                        <button onClick={() => handleEdit(app)} className="btn" style={{
+                          padding: '4px 6px', borderRadius: '4px',
+                          border: '1px solid rgba(129,140,248,0.3)',
+                          background: 'transparent', color: '#818cf8', fontSize: '10px',
+                        }}>編輯</button>
+                        <button onClick={() => handleDelete(app.id)} className="btn" style={{
+                          padding: '4px 6px', borderRadius: '4px',
+                          border: '1px solid rgba(248,113,113,0.3)',
+                          background: 'transparent', color: '#f87171', fontSize: '10px',
+                        }}>刪除</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 說明 */}
+            <footer style={{ marginTop: '20px', padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', fontSize: '11px', color: '#64748b', textAlign: 'center' }}>
+              <p style={{ margin: '0 0 8px', fontWeight: '500', color: '#94a3b8' }}>使用說明</p>
+              <p style={{ margin: '0 0 4px' }}>• <span style={{ color: '#fbbf24' }}>待追蹤</span>：等待開案結果 → <span style={{ color: '#22c55e' }}>有通過</span>（選CMS等級）或 <span style={{ color: '#ef4444' }}>沒通過</span>（進入追蹤期）</p>
+              <p style={{ margin: '0 0 4px' }}>• <span style={{ color: '#0ea5e9' }}>追蹤中</span>：每3個月電訪 → <span style={{ color: '#3b82f6' }}>體況如常</span>（再延3月）或 <span style={{ color: '#f97316' }}>體況變差</span>（重新申請）</p>
+              <p style={{ margin: '0 0 4px' }}>• 點擊 <span style={{ color: '#a855f7' }}>歷史</span> 可查看完整歷史軌跡</p>
+              <p style={{ margin: '0 0 4px' }}>• 總天數顏色：<span style={{ color: '#22c55e' }}>0-89天</span> → <span style={{ color: '#fbbf24' }}>90-179天</span> → <span style={{ color: '#ef4444' }}>180天以上</span></p>
+
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px', marginTop: '12px' }}>
+                <p style={{ margin: '0 0 10px', fontWeight: '500', color: '#22d3ee' }}>📋 長照管理工具組 · 工作流程</p>
+                <div style={{ 
+                  display: 'flex', 
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px', 
+                  flexWrap: 'wrap',
+                  padding: '10px',
+                  background: 'rgba(255,255,255,0.02)',
+                  borderRadius: '8px',
+                  marginBottom: '10px',
+                }}>
+                  <span style={{ 
+                    padding: '4px 10px', 
+                    background: 'linear-gradient(135deg, #818cf8 0%, #6366f1 100%)', 
+                    borderRadius: '6px', 
+                    color: 'white',
+                    fontSize: '11px',
+                    fontWeight: '500',
+                  }}>① 線上申請長照服務追蹤器</span>
+                  <span style={{ color: '#64748b' }}>→</span>
+                  <span style={{ 
+                    padding: '4px 10px', 
+                    background: 'rgba(100,116,139,0.3)', 
+                    borderRadius: '6px', 
+                    color: '#94a3b8',
+                    fontSize: '11px',
+                  }}>② 照顧計畫時效追蹤器</span>
+                  <span style={{ color: '#64748b' }}>→</span>
+                  <span style={{ 
+                    padding: '4px 10px', 
+                    background: 'rgba(100,116,139,0.3)', 
+                    borderRadius: '6px', 
+                    color: '#94a3b8',
+                    fontSize: '11px',
+                  }}>③ A碼時效追蹤器</span>
+                </div>
+                <p style={{ margin: '0 0 4px', lineHeight: '1.6' }}>
+                  <strong style={{ color: '#818cf8' }}>① 本工具（最前端）：</strong>追蹤線上申請，包含多輪申請與追蹤歷史
+                </p>
+                <p style={{ margin: '0 0 4px', lineHeight: '1.6' }}>
+                  <strong style={{ color: '#94a3b8' }}>② 照顧計畫時效追蹤器（母）：</strong>追蹤照顧計畫從簽審到服務開始的時效
+                </p>
+                <p style={{ margin: '0', lineHeight: '1.6' }}>
+                  <strong style={{ color: '#94a3b8' }}>③ A碼時效追蹤器（子）：</strong>追蹤每月 AA01/AA02 照顧管理費申報週期
+                </p>
+              </div>
+            </footer>
+          </div>
+
+          {/* CMS等級選擇 Modal */}
+          {showCmsModal && (
+            <div className="modal-overlay" onClick={() => { setShowCmsModal(false); setPendingApprovalId(null); }}>
+              <div className="modal-content" onClick={e => e.stopPropagation()}>
+                <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '16px', color: '#22c55e' }}>
+                  選擇 CMS 等級
+                </h2>
+                <p style={{ fontSize: '13px', color: '#94a3b8', marginBottom: '16px' }}>
+                  請選擇此個案的 CMS 等級（1-8級）
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '20px' }}>
+                  {CMS_LEVELS.map(level => (
+                    <button
+                      key={level}
+                      onClick={() => handleConfirmCms(level)}
+                      className="btn"
+                      style={{
+                        padding: '16px 12px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: level === 1 ? 'rgba(100,116,139,0.3)' : 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                        color: 'white',
+                        fontSize: '18px',
+                        fontWeight: '700',
+                      }}
+                    >
+                      {level}級
+                    </button>
+                  ))}
+                </div>
+                <p style={{ fontSize: '11px', color: '#64748b', marginBottom: '16px' }}>
+                  註：CMS 1級無給付額度
+                </p>
+                <button 
+                  onClick={() => { setShowCmsModal(false); setPendingApprovalId(null); }}
+                  style={{
+                    width: '100%', padding: '10px',
+                    borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)',
+                    background: 'transparent', color: '#94a3b8', fontSize: '13px', cursor: 'pointer',
+                  }}
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 歷史軌跡 Modal */}
+          {showHistoryModal && historyViewApp && (
+            <div className="modal-overlay" onClick={() => { setShowHistoryModal(false); setHistoryViewApp(null); }}>
+              <div className="modal-content" onClick={e => e.stopPropagation()}>
+                <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '8px', color: '#a855f7' }}>
+                  {historyViewApp.caseName} 的歷史軌跡
+                </h2>
+                <p style={{ fontSize: '12px', color: '#64748b', marginBottom: '16px' }}>
+                  首次申請：{formatDate(historyViewApp.firstApplicationDate)} · 
+                  總天數：{calculateTotalDays(historyViewApp)}天 · 
+                  總追蹤：{countTotalTrackings(historyViewApp.history || [])}次
+                </p>
+                
+                {renderHistoryTimeline(historyViewApp.history)}
+                
+                {historyViewApp.currentStatus === 'approved' && (
+                  <div style={{
+                    marginTop: '16px',
+                    padding: '12px',
+                    background: 'rgba(34,197,94,0.15)',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(34,197,94,0.3)',
+                    textAlign: 'center',
+                  }}>
+                    <div style={{ fontSize: '14px', fontWeight: '600', color: '#22c55e' }}>
+                      🎉 已通過 CMS {historyViewApp.cmsLevel}級
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                      歷經 {historyViewApp.history?.length || 1} 輪申請、{countTotalTrackings(historyViewApp.history || [])} 次追蹤
+                    </div>
+                  </div>
+                )}
+                
+                <button 
+                  onClick={() => { setShowHistoryModal(false); setHistoryViewApp(null); }}
+                  style={{
+                    width: '100%', padding: '10px', marginTop: '16px',
+                    borderRadius: '6px', border: '1px solid rgba(255,255,255,0.2)',
+                    background: 'transparent', color: '#94a3b8', fontSize: '13px', cursor: 'pointer',
+                  }}
+                >
+                  關閉
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<OnlineApplicationTracker />);
+  </script>
+</body>
+</html>
